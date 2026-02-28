@@ -1,0 +1,41 @@
+import { createEffect, createMemo, createSignal, type Accessor } from "solid-js"
+
+export type VimMode = "normal" | "insert"
+export type VimPending = "" | "c" | "d" | "g"
+
+export function createVimState(input: { enabled: Accessor<boolean>; initial?: Accessor<VimMode | undefined> }) {
+  const [mode, setMode] = createSignal<VimMode>(input.initial?.() ?? "insert")
+  const [pending, setPending] = createSignal<VimPending>("")
+
+  function clearPending() {
+    if (pending()) setPending("")
+  }
+
+  function changeMode(next: VimMode) {
+    clearPending()
+    setMode(next)
+  }
+
+  createEffect(() => {
+    const enabled = input.enabled()
+
+    if (!enabled) {
+      if (mode() !== "insert") setMode("insert")
+      clearPending()
+      return
+    }
+  })
+
+  return {
+    mode,
+    setMode: changeMode,
+    pending,
+    setPending,
+    clearPending,
+    reset() {
+      clearPending()
+      setMode("insert")
+    },
+    isInsert: createMemo(() => mode() === "insert"),
+  }
+}
