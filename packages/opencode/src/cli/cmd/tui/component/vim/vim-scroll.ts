@@ -7,8 +7,6 @@ export function vimScroll(event: VimEvent): VimScroll | undefined {
   const key = event.name ?? ""
   if (key === "e") return "line-down"
   if (key === "y") return "line-up"
-  if (key === "d") return "half-down"
-  if (key === "u") return "half-up"
   if (key === "f") return "page-down"
   if (key === "b") return "page-up"
   return undefined

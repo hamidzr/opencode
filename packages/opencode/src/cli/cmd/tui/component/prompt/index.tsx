@@ -186,6 +186,14 @@ export function Prompt(props: PromptProps) {
       if (action === "bottom") command.trigger("session.last")
     },
     autocomplete: () => autocomplete.visible,
+    history(direction) {
+      const item = history.move(direction, input.plainText)
+      if (!item) return undefined
+      setStore("prompt", item)
+      setStore("mode", item.mode ?? "normal")
+      restoreExtmarksFromParts(item.parts)
+      return item.input
+    },
   })
 
   createEffect(

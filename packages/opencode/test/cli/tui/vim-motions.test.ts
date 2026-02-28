@@ -55,8 +55,22 @@ function createTextarea(text: string) {
       textarea.plainText = textarea.plainText.slice(0, start) + textarea.plainText.slice(end)
       textarea.cursorOffset = start
     },
+    undoCalled: 0,
+    redoCalled: 0,
+    undo() {
+      textarea.undoCalled++
+      return true
+    },
+    redo() {
+      textarea.redoCalled++
+      return true
+    },
+    setText(value: string) {
+      textarea.plainText = value
+      textarea.cursorOffset = 0
+    },
   }
-  return textarea as unknown as TextareaRenderable
+  return textarea as unknown as TextareaRenderable & { undoCalled: number; redoCalled: number }
 }
 
 function createEvent(name: string, options?: { shift?: boolean; ctrl?: boolean; meta?: boolean; super?: boolean }) {
@@ -83,12 +97,19 @@ function createHandler(
     mode?: "normal" | "insert"
     submit?: () => void
     autocomplete?: () => false | "@" | "/"
+    history?: (direction: -1 | 1) => string | undefined
   },
 ) {
   const textarea = createTextarea(text)
   const [enabled] = createSignal(options?.enabled ?? true)
   const [mode, setMode] = createSignal<"normal" | "insert">(options?.mode ?? "normal")
-  const [pending, setPending] = createSignal<"" | "c" | "d" | "g">("")
+  const [pending, setPending] = createSignal<
+    "" | "c" | "d" | "g" | "r" | "y" | "f" | "F" | "t" | "T" | "ci" | "ca" | "di" | "da" | "yi" | "ya"
+  >("")
+  let register = ""
+  let registerType: "char" | "line" = "char"
+  let count = ""
+  let lastFind: { type: "f" | "F" | "t" | "T"; char: string } | undefined
   const scrollCalls: VimScroll[] = []
   const jumpCalls: VimJump[] = []
 
@@ -96,15 +117,17 @@ function createHandler(
     setPending("")
   }
 
+  function clearCount() {
+    count = ""
+  }
+
   function changeMode(next: "normal" | "insert") {
     clearPending()
+    clearCount()
     setMode(next)
   }
 
-  const state: Pick<
-    ReturnType<typeof createVimState>,
-    "mode" | "setMode" | "reset" | "isInsert" | "pending" | "setPending" | "clearPending"
-  > = {
+  const state: ReturnType<typeof createVimState> = {
     mode,
     setMode: changeMode,
     pending,
@@ -112,9 +135,38 @@ function createHandler(
     clearPending,
     reset() {
       clearPending()
+      clearCount()
       setMode("insert")
     },
     isInsert: () => mode() === "insert",
+    setRegister(text: string, type: "char" | "line") {
+      register = text
+      registerType = type
+    },
+    get register() {
+      return register
+    },
+    get registerType() {
+      return registerType
+    },
+    pushCount(digit: string) {
+      count += digit
+    },
+    consumeCount(): number {
+      const n = count ? parseInt(count, 10) : 1
+      count = ""
+      return Math.min(n, 999)
+    },
+    get hasCount() {
+      return count.length > 0
+    },
+    clearCount,
+    setLastFind(find: { type: "f" | "F" | "t" | "T"; char: string }) {
+      lastFind = find
+    },
+    get lastFind() {
+      return lastFind
+    },
   }
   const handler = createVimHandler({
     enabled,
@@ -128,6 +180,7 @@ function createHandler(
       jumpCalls.push(action)
     },
     autocomplete: options?.autocomplete,
+    history: options?.history,
   })
 
   return { textarea, handler, state, scrollCalls, jumpCalls }
@@ -559,7 +612,7 @@ describe("vim motion handler", () => {
     expect(ctx.textarea.plainText).toBe("hello world")
   })
 
-  test("pending d clears on invalid key and key is handled normally", () => {
+  test("d then i enters text object pending (di)", () => {
     const ctx = createHandler("abc")
 
     expect(ctx.handler.handleKey(createEvent("d").event)).toBe(true)
@@ -568,14 +621,17 @@ describe("vim motion handler", () => {
     const i = createEvent("i")
     expect(ctx.handler.handleKey(i.event)).toBe(true)
     expect(i.prevented()).toBe(true)
-    expect(ctx.state.pending()).toBe("")
-    expect(ctx.state.mode()).toBe("insert")
+    expect(ctx.state.pending()).toBe("di")
   })
 
   test("mode switch clears pending state", () => {
     const ctx = createHandler("abc")
     expect(ctx.handler.handleKey(createEvent("d").event)).toBe(true)
     expect(ctx.state.pending()).toBe("d")
+
+    // d then l clears pending and moves (not a text object key)
+    expect(ctx.handler.handleKey(createEvent("l").event)).toBe(true)
+    expect(ctx.state.pending()).toBe("")
 
     expect(ctx.handler.handleKey(createEvent("i").event)).toBe(true)
     expect(ctx.state.mode()).toBe("insert")
@@ -607,8 +663,6 @@ describe("vim motion handler", () => {
     const keys: Array<[string, VimScroll]> = [
       ["e", "line-down"],
       ["y", "line-up"],
-      ["d", "half-down"],
-      ["u", "half-up"],
       ["f", "page-down"],
       ["b", "page-up"],
     ]
@@ -621,15 +675,26 @@ describe("vim motion handler", () => {
     }
   })
 
+  test("ctrl-d and ctrl-u are not intercepted", () => {
+    const ctx = createHandler("abc")
+    const d = createEvent("d", { ctrl: true })
+    expect(ctx.handler.handleKey(d.event)).toBe(false)
+    expect(d.prevented()).toBe(false)
+
+    const u = createEvent("u", { ctrl: true })
+    expect(ctx.handler.handleKey(u.event)).toBe(false)
+    expect(u.prevented()).toBe(false)
+  })
+
   test("ctrl scroll clears pending operator", () => {
     const ctx = createHandler("abc")
     expect(ctx.handler.handleKey(createEvent("d").event)).toBe(true)
     expect(ctx.state.pending()).toBe("d")
 
-    const evt = createEvent("d", { ctrl: true })
+    const evt = createEvent("f", { ctrl: true })
     expect(ctx.handler.handleKey(evt.event)).toBe(true)
     expect(evt.prevented()).toBe(true)
-    expect(ctx.scrollCalls.at(-1)).toBe("half-down")
+    expect(ctx.scrollCalls.at(-1)).toBe("page-down")
     expect(ctx.state.pending()).toBe("")
   })
 
@@ -732,17 +797,17 @@ describe("vim motion handler", () => {
     expect(ctx.handler.handleKey(createEvent("d").event)).toBe(true)
     expect(ctx.state.pending()).toBe("d")
 
-    const first = createEvent("d", { ctrl: true })
+    const first = createEvent("f", { ctrl: true })
     expect(ctx.handler.handleKey(first.event)).toBe(true)
     expect(first.prevented()).toBe(true)
     expect(ctx.state.pending()).toBe("")
 
-    const second = createEvent("d", { ctrl: true })
+    const second = createEvent("f", { ctrl: true })
     expect(ctx.handler.handleKey(second.event)).toBe(true)
     expect(second.prevented()).toBe(true)
     expect(ctx.state.pending()).toBe("")
 
-    expect(ctx.scrollCalls).toEqual(["half-down", "half-down"])
+    expect(ctx.scrollCalls).toEqual(["page-down", "page-down"])
   })
 
   test("repeated G does not create pending", () => {
@@ -760,16 +825,572 @@ describe("vim motion handler", () => {
 
     expect(ctx.jumpCalls).toEqual(["bottom", "bottom"])
   })
+
+  test("u calls undo", () => {
+    const ctx = createHandler("abc")
+    const u = createEvent("u")
+    expect(ctx.handler.handleKey(u.event)).toBe(true)
+    expect(u.prevented()).toBe(true)
+    expect((ctx.textarea as any).undoCalled).toBe(1)
+  })
+
+  test("Ctrl-r calls redo", () => {
+    const ctx = createHandler("abc")
+    const r = createEvent("r", { ctrl: true })
+    expect(ctx.handler.handleKey(r.event)).toBe(true)
+    expect(r.prevented()).toBe(true)
+    expect((ctx.textarea as any).redoCalled).toBe(1)
+  })
+
+  test("D deletes to end of line", () => {
+    const ctx = createHandler("hello world")
+    ctx.textarea.cursorOffset = 5
+    const d = createEvent("D")
+    expect(ctx.handler.handleKey(d.event)).toBe(true)
+    expect(d.prevented()).toBe(true)
+    expect(ctx.textarea.plainText).toBe("hello")
+    expect(ctx.textarea.cursorOffset).toBe(5)
+  })
+
+  test("D on multiline deletes to end of current line", () => {
+    const ctx = createHandler("abc\ndef")
+    ctx.textarea.cursorOffset = 1
+    ctx.handler.handleKey(createEvent("D").event)
+    expect(ctx.textarea.plainText).toBe("a\ndef")
+  })
+
+  test("C changes to end of line and enters insert", () => {
+    const ctx = createHandler("hello world")
+    ctx.textarea.cursorOffset = 5
+    const c = createEvent("C")
+    expect(ctx.handler.handleKey(c.event)).toBe(true)
+    expect(c.prevented()).toBe(true)
+    expect(ctx.textarea.plainText).toBe("hello")
+    expect(ctx.state.mode()).toBe("insert")
+  })
+
+  test("s deletes char and enters insert", () => {
+    const ctx = createHandler("abc")
+    ctx.textarea.cursorOffset = 1
+    const s = createEvent("s")
+    expect(ctx.handler.handleKey(s.event)).toBe(true)
+    expect(s.prevented()).toBe(true)
+    expect(ctx.textarea.plainText).toBe("ac")
+    expect(ctx.state.mode()).toBe("insert")
+  })
+
+  test("r replaces char under cursor", () => {
+    const ctx = createHandler("abc")
+    ctx.textarea.cursorOffset = 1
+
+    const r = createEvent("r")
+    expect(ctx.handler.handleKey(r.event)).toBe(true)
+    expect(ctx.state.pending()).toBe("r")
+
+    const x = createEvent("x")
+    expect(ctx.handler.handleKey(x.event)).toBe(true)
+    expect(x.prevented()).toBe(true)
+    expect(ctx.textarea.plainText).toBe("axc")
+    expect(ctx.textarea.cursorOffset).toBe(1)
+    expect(ctx.state.pending()).toBe("")
+    expect(ctx.state.mode()).toBe("normal")
+  })
+
+  test("r cancelled by escape", () => {
+    const ctx = createHandler("abc")
+    ctx.handler.handleKey(createEvent("r").event)
+    expect(ctx.state.pending()).toBe("r")
+
+    ctx.handler.handleKey(createEvent("escape").event)
+    expect(ctx.state.pending()).toBe("")
+    expect(ctx.textarea.plainText).toBe("abc")
+  })
+
+  test("J joins current line with next", () => {
+    const ctx = createHandler("abc\ndef")
+    ctx.textarea.cursorOffset = 1
+    const j = createEvent("J")
+    expect(ctx.handler.handleKey(j.event)).toBe(true)
+    expect(j.prevented()).toBe(true)
+    expect(ctx.textarea.plainText).toBe("abc def")
+    expect(ctx.textarea.cursorOffset).toBe(3)
+  })
+
+  test("J on last line is a no-op", () => {
+    const ctx = createHandler("abc")
+    ctx.textarea.cursorOffset = 1
+    ctx.handler.handleKey(createEvent("J").event)
+    expect(ctx.textarea.plainText).toBe("abc")
+  })
+
+  test("~ toggles case and advances cursor", () => {
+    const ctx = createHandler("aBc")
+    ctx.textarea.cursorOffset = 0
+
+    ctx.handler.handleKey(createEvent("~").event)
+    expect(ctx.textarea.plainText).toBe("ABc")
+    expect(ctx.textarea.cursorOffset).toBe(1)
+
+    ctx.handler.handleKey(createEvent("~").event)
+    expect(ctx.textarea.plainText).toBe("Abc")
+    expect(ctx.textarea.cursorOffset).toBe(2)
+  })
+
+  test("yy yanks current line", () => {
+    const ctx = createHandler("one\ntwo\nthree")
+    ctx.textarea.cursorOffset = 5
+
+    ctx.handler.handleKey(createEvent("y").event)
+    expect(ctx.state.pending()).toBe("y")
+    ctx.handler.handleKey(createEvent("y").event)
+    expect(ctx.state.pending()).toBe("")
+    expect(ctx.state.register).toBe("two")
+    expect(ctx.state.registerType).toBe("line")
+    // cursor unchanged
+    expect(ctx.textarea.cursorOffset).toBe(5)
+    expect(ctx.textarea.plainText).toBe("one\ntwo\nthree")
+  })
+
+  test("yw yanks word", () => {
+    const ctx = createHandler("hello world")
+    ctx.textarea.cursorOffset = 0
+
+    ctx.handler.handleKey(createEvent("y").event)
+    ctx.handler.handleKey(createEvent("w").event)
+    expect(ctx.state.register).toBe("hello ")
+    expect(ctx.state.registerType).toBe("char")
+    expect(ctx.textarea.plainText).toBe("hello world")
+  })
+
+  test("dd saves to register", () => {
+    const ctx = createHandler("one\ntwo\nthree")
+    ctx.textarea.cursorOffset = 5
+
+    ctx.handler.handleKey(createEvent("d").event)
+    ctx.handler.handleKey(createEvent("d").event)
+    expect(ctx.state.register).toBe("two")
+    expect(ctx.state.registerType).toBe("line")
+  })
+
+  test("dw saves to register", () => {
+    const ctx = createHandler("hello world")
+    ctx.textarea.cursorOffset = 0
+
+    ctx.handler.handleKey(createEvent("d").event)
+    ctx.handler.handleKey(createEvent("w").event)
+    expect(ctx.state.register).toBe("hello ")
+    expect(ctx.state.registerType).toBe("char")
+  })
+
+  test("x saves to register", () => {
+    const ctx = createHandler("abc")
+    ctx.textarea.cursorOffset = 1
+    ctx.handler.handleKey(createEvent("x").event)
+    expect(ctx.state.register).toBe("b")
+    expect(ctx.state.registerType).toBe("char")
+  })
+
+  test("p pastes after cursor (charwise)", () => {
+    const ctx = createHandler("abc")
+    ctx.textarea.cursorOffset = 0
+    ctx.state.setRegister("XY", "char")
+
+    ctx.handler.handleKey(createEvent("p").event)
+    expect(ctx.textarea.plainText).toBe("aXYbc")
+    expect(ctx.textarea.cursorOffset).toBe(2)
+  })
+
+  test("P pastes before cursor (charwise)", () => {
+    const ctx = createHandler("abc")
+    ctx.textarea.cursorOffset = 1
+    ctx.state.setRegister("XY", "char")
+
+    ctx.handler.handleKey(createEvent("P").event)
+    expect(ctx.textarea.plainText).toBe("aXYbc")
+    expect(ctx.textarea.cursorOffset).toBe(2)
+  })
+
+  test("p pastes after cursor (linewise)", () => {
+    const ctx = createHandler("one\ntwo")
+    ctx.textarea.cursorOffset = 1
+    ctx.state.setRegister("NEW", "line")
+
+    ctx.handler.handleKey(createEvent("p").event)
+    expect(ctx.textarea.plainText).toBe("one\nNEW\ntwo")
+    expect(ctx.textarea.cursorOffset).toBe(4)
+  })
+
+  test("P pastes before cursor (linewise)", () => {
+    const ctx = createHandler("one\ntwo")
+    ctx.textarea.cursorOffset = 5
+    ctx.state.setRegister("NEW", "line")
+
+    ctx.handler.handleKey(createEvent("P").event)
+    expect(ctx.textarea.plainText).toBe("one\nNEW\ntwo")
+    expect(ctx.textarea.cursorOffset).toBe(4)
+  })
+
+  test("dd then p reinserts deleted line below", () => {
+    const ctx = createHandler("one\ntwo\nthree")
+    ctx.textarea.cursorOffset = 5
+
+    // dd
+    ctx.handler.handleKey(createEvent("d").event)
+    ctx.handler.handleKey(createEvent("d").event)
+    expect(ctx.textarea.plainText).toBe("one\nthree")
+
+    // p pastes below current line (now "three")
+    ctx.handler.handleKey(createEvent("p").event)
+    expect(ctx.textarea.plainText).toBe("one\nthree\ntwo")
+  })
+
+  test("3w moves three words forward", () => {
+    const ctx = createHandler("one two three four five")
+    ctx.textarea.cursorOffset = 0
+
+    ctx.handler.handleKey(createEvent("3").event)
+    ctx.handler.handleKey(createEvent("w").event)
+    expect(ctx.textarea.cursorOffset).toBe(14) // "four"
+  })
+
+  test("2j moves two lines down", () => {
+    const ctx = createHandler("a\nb\nc\nd")
+    ctx.textarea.cursorOffset = 0
+
+    ctx.handler.handleKey(createEvent("2").event)
+    ctx.handler.handleKey(createEvent("j").event)
+    expect(ctx.textarea.cursorOffset).toBe(4) // "c"
+  })
+
+  test("3x deletes three chars", () => {
+    const ctx = createHandler("abcdef")
+    ctx.textarea.cursorOffset = 1
+
+    ctx.handler.handleKey(createEvent("3").event)
+    ctx.handler.handleKey(createEvent("x").event)
+    expect(ctx.textarea.plainText).toBe("aef")
+    expect(ctx.state.register).toBe("bcd")
+  })
+
+  test("2dd deletes two lines", () => {
+    const ctx = createHandler("one\ntwo\nthree\nfour")
+    ctx.textarea.cursorOffset = 0
+
+    ctx.handler.handleKey(createEvent("2").event)
+    ctx.handler.handleKey(createEvent("d").event)
+    ctx.handler.handleKey(createEvent("d").event)
+    expect(ctx.textarea.plainText).toBe("three\nfour")
+    expect(ctx.state.register).toBe("one\ntwo")
+    expect(ctx.state.registerType).toBe("line")
+  })
+
+  test("0 without count goes to line beginning", () => {
+    const ctx = createHandler("hello")
+    ctx.textarea.cursorOffset = 3
+    ctx.handler.handleKey(createEvent("0").event)
+    expect(ctx.textarea.cursorOffset).toBe(0)
+  })
+
+  test("10l moves 10 chars right (clamped)", () => {
+    const ctx = createHandler("abc")
+    ctx.textarea.cursorOffset = 0
+
+    ctx.handler.handleKey(createEvent("1").event)
+    ctx.handler.handleKey(createEvent("0").event)
+    ctx.handler.handleKey(createEvent("l").event)
+    expect(ctx.textarea.cursorOffset).toBe(2) // clamped to last char
+  })
+
+  test("escape clears count", () => {
+    const ctx = createHandler("abc")
+    ctx.handler.handleKey(createEvent("3").event)
+    const esc = createEvent("escape")
+    expect(ctx.handler.handleKey(esc.event)).toBe(true)
+    // subsequent w should move once
+    ctx.handler.handleKey(createEvent("w").event)
+    // "abc" has no next word, stays at end
+    expect(ctx.textarea.cursorOffset).toBe(3)
+  })
+
+  test("fx moves to next occurrence of x on line", () => {
+    const ctx = createHandler("hello world")
+    ctx.textarea.cursorOffset = 0
+
+    ctx.handler.handleKey(createEvent("f").event)
+    expect(ctx.state.pending()).toBe("f")
+    ctx.handler.handleKey(createEvent("o").event)
+    expect(ctx.textarea.cursorOffset).toBe(4) // first 'o' in "hello"
+    expect(ctx.state.pending()).toBe("")
+  })
+
+  test("Fx moves backward to x on line", () => {
+    const ctx = createHandler("hello world")
+    ctx.textarea.cursorOffset = 8
+
+    ctx.handler.handleKey(createEvent("F").event)
+    ctx.handler.handleKey(createEvent("o").event)
+    expect(ctx.textarea.cursorOffset).toBe(7) // 'o' in "world"
+  })
+
+  test("tx stops before target", () => {
+    const ctx = createHandler("hello world")
+    ctx.textarea.cursorOffset = 0
+
+    ctx.handler.handleKey(createEvent("t").event)
+    ctx.handler.handleKey(createEvent("o").event)
+    expect(ctx.textarea.cursorOffset).toBe(3) // one before 'o' in "hello"
+  })
+
+  test("Tx stops after target going backward", () => {
+    const ctx = createHandler("hello world")
+    ctx.textarea.cursorOffset = 8
+
+    ctx.handler.handleKey(createEvent("T").event)
+    ctx.handler.handleKey(createEvent("o").event)
+    expect(ctx.textarea.cursorOffset).toBe(8) // one after 'o' in "world"
+  })
+
+  test("; repeats last find forward", () => {
+    const ctx = createHandler("abcabc")
+    ctx.textarea.cursorOffset = 0
+
+    ctx.handler.handleKey(createEvent("f").event)
+    ctx.handler.handleKey(createEvent("b").event)
+    expect(ctx.textarea.cursorOffset).toBe(1)
+
+    ctx.handler.handleKey(createEvent(";").event)
+    expect(ctx.textarea.cursorOffset).toBe(4)
+  })
+
+  test(", repeats last find in reverse", () => {
+    const ctx = createHandler("abcabc")
+    ctx.textarea.cursorOffset = 0
+
+    ctx.handler.handleKey(createEvent("f").event)
+    ctx.handler.handleKey(createEvent("b").event)
+    expect(ctx.textarea.cursorOffset).toBe(1)
+
+    ctx.handler.handleKey(createEvent(";").event)
+    expect(ctx.textarea.cursorOffset).toBe(4)
+
+    ctx.handler.handleKey(createEvent(",").event)
+    expect(ctx.textarea.cursorOffset).toBe(1)
+  })
+
+  test("k cycles history backward on single-line input", () => {
+    const items = ["previous prompt", "older prompt"]
+    let idx = 0
+    const ctx = createHandler("current", {
+      history(direction) {
+        if (direction === -1 && idx < items.length) return items[idx++]
+        return undefined
+      },
+    })
+    ctx.textarea.cursorOffset = 3
+
+    ctx.handler.handleKey(createEvent("k").event)
+    expect(ctx.textarea.plainText).toBe("previous prompt")
+    expect(ctx.textarea.cursorOffset).toBe(0)
+  })
+
+  test("j cycles history forward on single-line input", () => {
+    let called = false
+    const ctx = createHandler("current", {
+      history(direction) {
+        if (direction === 1) {
+          called = true
+          return "next prompt"
+        }
+        return undefined
+      },
+    })
+    ctx.textarea.cursorOffset = 3
+
+    ctx.handler.handleKey(createEvent("j").event)
+    expect(called).toBe(true)
+    expect(ctx.textarea.plainText).toBe("next prompt")
+  })
+
+  test("j moves down normally on multiline when not on last line", () => {
+    const ctx = createHandler("line1\nline2", {
+      history() {
+        return "should not be called"
+      },
+    })
+    ctx.textarea.cursorOffset = 0
+
+    ctx.handler.handleKey(createEvent("j").event)
+    // should move to second line, not cycle history
+    expect(ctx.textarea.cursorOffset).toBe(6)
+    expect(ctx.textarea.plainText).toBe("line1\nline2")
+  })
+
+  test("k on first line of multiline cycles history", () => {
+    let called = false
+    const ctx = createHandler("line1\nline2", {
+      history(direction) {
+        if (direction === -1) {
+          called = true
+          return "previous"
+        }
+        return undefined
+      },
+    })
+    ctx.textarea.cursorOffset = 2 // on first line
+
+    ctx.handler.handleKey(createEvent("k").event)
+    expect(called).toBe(true)
+    expect(ctx.textarea.plainText).toBe("previous")
+  })
+
+  test("j/k without history callback just moves cursor", () => {
+    const ctx = createHandler("abc")
+    ctx.textarea.cursorOffset = 0
+
+    ctx.handler.handleKey(createEvent("j").event)
+    // single line, no history, just stays
+    expect(ctx.textarea.cursorOffset).toBe(0)
+    expect(ctx.textarea.plainText).toBe("abc")
+  })
+
+  test("f escape cancels without moving", () => {
+    const ctx = createHandler("hello")
+    ctx.textarea.cursorOffset = 0
+
+    ctx.handler.handleKey(createEvent("f").event)
+    expect(ctx.state.pending()).toBe("f")
+    ctx.handler.handleKey(createEvent("escape").event)
+    expect(ctx.state.pending()).toBe("")
+    expect(ctx.textarea.cursorOffset).toBe(0)
+  })
+
+  test("dd then P reinserts deleted line above", () => {
+    const ctx = createHandler("one\ntwo\nthree")
+    ctx.textarea.cursorOffset = 5
+
+    ctx.handler.handleKey(createEvent("d").event)
+    ctx.handler.handleKey(createEvent("d").event)
+    expect(ctx.textarea.plainText).toBe("one\nthree")
+
+    // P pastes above current line
+    ctx.handler.handleKey(createEvent("P").event)
+    expect(ctx.textarea.plainText).toBe("one\ntwo\nthree")
+  })
+
+  test("ciw changes inner word", () => {
+    const ctx = createHandler("hello world test")
+    ctx.textarea.cursorOffset = 7 // on 'o' in "world"
+
+    ctx.handler.handleKey(createEvent("c").event)
+    ctx.handler.handleKey(createEvent("i").event)
+    expect(ctx.state.pending()).toBe("ci")
+    ctx.handler.handleKey(createEvent("w").event)
+    expect(ctx.textarea.plainText).toBe("hello  test")
+    expect(ctx.state.mode()).toBe("insert")
+    expect(ctx.state.register).toBe("world")
+  })
+
+  test("diw deletes inner word", () => {
+    const ctx = createHandler("hello world test")
+    ctx.textarea.cursorOffset = 7
+
+    ctx.handler.handleKey(createEvent("d").event)
+    ctx.handler.handleKey(createEvent("i").event)
+    ctx.handler.handleKey(createEvent("w").event)
+    expect(ctx.textarea.plainText).toBe("hello  test")
+    expect(ctx.state.mode()).toBe("normal")
+    expect(ctx.state.register).toBe("world")
+  })
+
+  test("daw deletes around word (including trailing space)", () => {
+    const ctx = createHandler("hello world test")
+    ctx.textarea.cursorOffset = 7
+
+    ctx.handler.handleKey(createEvent("d").event)
+    ctx.handler.handleKey(createEvent("a").event)
+    ctx.handler.handleKey(createEvent("w").event)
+    expect(ctx.textarea.plainText).toBe("hello test")
+    expect(ctx.state.register).toBe("world ")
+  })
+
+  test("yiw yanks inner word without deleting", () => {
+    const ctx = createHandler("hello world")
+    ctx.textarea.cursorOffset = 7
+
+    ctx.handler.handleKey(createEvent("y").event)
+    ctx.handler.handleKey(createEvent("i").event)
+    ctx.handler.handleKey(createEvent("w").event)
+    expect(ctx.textarea.plainText).toBe("hello world")
+    expect(ctx.state.register).toBe("world")
+  })
+
+  test('ci" changes inside quotes', () => {
+    const ctx = createHandler('say "hello world" end')
+    ctx.textarea.cursorOffset = 8 // inside quotes
+
+    ctx.handler.handleKey(createEvent("c").event)
+    ctx.handler.handleKey(createEvent("i").event)
+    ctx.handler.handleKey(createEvent('"').event)
+    expect(ctx.textarea.plainText).toBe('say "" end')
+    expect(ctx.state.mode()).toBe("insert")
+    expect(ctx.state.register).toBe("hello world")
+  })
+
+  test("di( deletes inside parens", () => {
+    const ctx = createHandler("foo(bar, baz)end")
+    ctx.textarea.cursorOffset = 5 // inside parens
+
+    ctx.handler.handleKey(createEvent("d").event)
+    ctx.handler.handleKey(createEvent("i").event)
+    ctx.handler.handleKey(createEvent("(").event)
+    expect(ctx.textarea.plainText).toBe("foo()end")
+    expect(ctx.state.register).toBe("bar, baz")
+  })
+
+  test("da( deletes including parens", () => {
+    const ctx = createHandler("foo(bar)end")
+    ctx.textarea.cursorOffset = 5
+
+    ctx.handler.handleKey(createEvent("d").event)
+    ctx.handler.handleKey(createEvent("a").event)
+    ctx.handler.handleKey(createEvent("(").event)
+    expect(ctx.textarea.plainText).toBe("fooend")
+    expect(ctx.state.register).toBe("(bar)")
+  })
+
+  test("text object escape cancels", () => {
+    const ctx = createHandler("hello world")
+    ctx.handler.handleKey(createEvent("c").event)
+    ctx.handler.handleKey(createEvent("i").event)
+    expect(ctx.state.pending()).toBe("ci")
+    ctx.handler.handleKey(createEvent("escape").event)
+    expect(ctx.state.pending()).toBe("")
+    expect(ctx.textarea.plainText).toBe("hello world")
+  })
+
+  test("text object with no match is no-op", () => {
+    const ctx = createHandler("hello world")
+    ctx.textarea.cursorOffset = 3
+
+    ctx.handler.handleKey(createEvent("c").event)
+    ctx.handler.handleKey(createEvent("i").event)
+    ctx.handler.handleKey(createEvent('"').event)
+    // no quotes in text, should be no-op except clearing pending
+    expect(ctx.textarea.plainText).toBe("hello world")
+    expect(ctx.state.pending()).toBe("")
+    expect(ctx.state.mode()).toBe("normal")
+  })
 })
 
 describe("vim scroll mapping", () => {
   test("vimScroll maps ctrl keys to actions", () => {
     expect(vimScroll(createEvent("e", { ctrl: true }).event)).toBe("line-down")
     expect(vimScroll(createEvent("y", { ctrl: true }).event)).toBe("line-up")
-    expect(vimScroll(createEvent("d", { ctrl: true }).event)).toBe("half-down")
-    expect(vimScroll(createEvent("u", { ctrl: true }).event)).toBe("half-up")
     expect(vimScroll(createEvent("f", { ctrl: true }).event)).toBe("page-down")
     expect(vimScroll(createEvent("b", { ctrl: true }).event)).toBe("page-up")
+    // ctrl-d and ctrl-u are not intercepted (left for system use)
+    expect(vimScroll(createEvent("d", { ctrl: true }).event)).toBe(undefined)
+    expect(vimScroll(createEvent("u", { ctrl: true }).event)).toBe(undefined)
     expect(vimScroll(createEvent("b", { ctrl: true, meta: true }).event)).toBe(undefined)
     expect(vimScroll(createEvent("b", { ctrl: false }).event)).toBe(undefined)
   })
