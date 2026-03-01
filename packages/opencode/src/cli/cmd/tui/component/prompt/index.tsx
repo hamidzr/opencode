@@ -461,11 +461,8 @@ export function Prompt(props: PromptProps) {
   })
 
   function submitFromTextarea() {
-    if (store.mode !== "normal") {
-      submit()
-      return
-    }
-    if (vimEnabled() && vimState.isInsert()) {
+    const remaining = input.plainText.slice(input.cursorOffset)
+    if (remaining.length > 0 && remaining.trimEnd().length > 0) {
       input.insertText("\n")
       return
     }

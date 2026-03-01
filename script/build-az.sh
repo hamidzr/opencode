@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# build opencode with local vim-mode patch on top of latest stable release
-# usage: ./script/build-az.sh [upstream-tag]
-#   upstream-tag: defaults to latest v* tag from upstream
+# build opencode with local vim-mode patch
+# usage: ./script/build-az.sh [update [upstream-tag]]
+#   update: fetch latest upstream tag, rebase patch branch onto it, then build
+#   no args: build from current state as-is
 
 set -euo pipefail
 
@@ -12,36 +13,44 @@ PATCH_BRANCH="leohenon/feat/vim-prompt-input-core"
 UPSTREAM_REMOTE="upstream"
 INSTALL_DIR="$HOME/.local/bin"
 
-# resolve upstream tag
-if [[ -n "${1:-}" ]]; then
-  BASE_TAG="$1"
-else
-  git fetch "$UPSTREAM_REMOTE" --tags --quiet
-  BASE_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+MODE="${1:-build}"
+
+if [[ "$MODE" == "update" ]]; then
+  # resolve upstream tag
+  if [[ -n "${2:-}" ]]; then
+    BASE_TAG="$2"
+  else
+    git fetch "$UPSTREAM_REMOTE" --tags --quiet
+    BASE_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+  fi
+
+  if [[ -z "$BASE_TAG" ]]; then
+    echo "error: could not determine latest stable tag" >&2
+    exit 1
+  fi
+
+  echo "==> updating: rebasing onto $BASE_TAG"
+
+  # ensure we're on the patch branch
+  git checkout "$PATCH_BRANCH" --quiet 2>/dev/null || {
+    echo "error: branch $PATCH_BRANCH not found" >&2
+    exit 1
+  }
+
+  git rebase --onto "$BASE_TAG" HEAD~1 --quiet
+
+  AZ_VERSION="${BASE_TAG#v}-az"
+  git tag -f "v${AZ_VERSION}"
 fi
 
-if [[ -z "$BASE_TAG" ]]; then
-  echo "error: could not determine latest stable tag" >&2
+# derive version from current HEAD's closest tag
+AZ_VERSION="${AZ_VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')}"
+if [[ -z "$AZ_VERSION" ]]; then
+  echo "error: could not determine version from current HEAD" >&2
   exit 1
 fi
 
-AZ_VERSION="${BASE_TAG#v}-az"
-AZ_TAG="v${AZ_VERSION}"
-
-echo "==> base: $BASE_TAG, building: $AZ_TAG"
-
-# ensure we're on the patch branch
-git checkout "$PATCH_BRANCH" --quiet 2>/dev/null || {
-  echo "error: branch $PATCH_BRANCH not found" >&2
-  exit 1
-}
-
-# rebase the single squashed commit onto the new tag
-echo "==> rebasing onto $BASE_TAG"
-git rebase --onto "$BASE_TAG" HEAD~1 --quiet
-
-# re-tag
-git tag -f "$AZ_TAG"
+echo "==> building: v${AZ_VERSION}"
 
 echo "==> installing dependencies"
 bun install --quiet
