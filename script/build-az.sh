@@ -16,6 +16,13 @@ INSTALL_DIR="$HOME/.local/bin"
 MODE="${1:-build}"
 
 if [[ "$MODE" == "update" ]]; then
+  if ! git remote get-url "$UPSTREAM_REMOTE" &>/dev/null; then
+    echo "warning: remote '$UPSTREAM_REMOTE' not found, skipping update" >&2
+    MODE="build"
+  fi
+fi
+
+if [[ "$MODE" == "update" ]]; then
   # resolve upstream tag
   if [[ -n "${2:-}" ]]; then
     BASE_TAG="$2"
@@ -43,12 +50,10 @@ if [[ "$MODE" == "update" ]]; then
   git tag -f "v${AZ_VERSION}"
 fi
 
-# derive version from current HEAD's closest tag
+# derive version from current HEAD's closest tag, ensure -az suffix
 AZ_VERSION="${AZ_VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')}"
-if [[ -z "$AZ_VERSION" ]]; then
-  echo "error: could not determine version from current HEAD" >&2
-  exit 1
-fi
+AZ_VERSION="${AZ_VERSION:-unknown}"
+[[ "$AZ_VERSION" != *-az ]] && AZ_VERSION="${AZ_VERSION}-az"
 
 echo "==> building: v${AZ_VERSION}"
 
